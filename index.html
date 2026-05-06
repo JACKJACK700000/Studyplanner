@@ -295,7 +295,13 @@ select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/
 [data-theme=dark] input[type=text],[data-theme=dark] input[type=number],
 [data-theme=dark] input[type=date],[data-theme=dark] input[type=time],
 [data-theme=dark] input[type=email],[data-theme=dark] input[type=password],
+[data-theme=dark] input[type=url],
 [data-theme=dark] textarea,[data-theme=dark] select{background:var(--surface2);color:var(--text)}
+[data-theme=dark] .bedtime-bar-edit input[type=time]{background:rgba(255,255,255,.15);color:#fff}
+[data-theme=dark] .btn-primary{background:#E8E8EA;color:#111113}
+[data-theme=dark] .btn-primary:hover{background:#fff;color:#111113}
+[data-theme=dark] .btn-secondary{background:var(--surface2);color:var(--text);border-color:var(--border)}
+[data-theme=dark] .btn-secondary:hover{background:var(--surface3);border-color:var(--border-strong)}
 [data-theme=dark] .cal-day:hover{background:#212124}
 [data-theme=dark] .auth-box::before{display:none}
 
@@ -682,7 +688,7 @@ async function doSignOut(){
   assignments=[];schedules={default:{blocks:cloneDefaults(),bedtime:'22:30'}};
   calendarData=null;editingId=null;editingDow='default';
   draftBlocks=[];draftBedtime='22:30';draftDirty=false;
-  completedBlocks={};timerInterval&&clearInterval(timerInterval);
+  completedBlocks={};timerInterval&&clearInterval(timerInterval);dataLoaded=false;
   document.getElementById('app-screen').style.display='none';
   document.getElementById('auth-screen').style.display='flex';
   showAuthTab('login');
@@ -691,16 +697,29 @@ async function doSignOut(){
 async function loadAndLaunch(user){
   currentUserId=user.id;currentUserEmail=user.email;
   currentUserName=user.user_metadata?.name||user.email.split('@')[0];
-  const{data:row}=await sb.from('user_data').select('*').eq('user_id',user.id).single();
-  const d=row||{};
-  assignments=Array.isArray(d.assignments)?d.assignments:[];
-  schedules=d.schedules||{default:{blocks:cloneDefaults(),bedtime:'22:30'}};
-  calendarData=d.calendar_data||null;
-  _customClasses=d.custom_classes||{};
+  const{data:row,error}=await sb.from('user_data').select('*').eq('user_id',user.id).single();
+  // Only update state if load succeeded — never wipe on error
+  if(!error&&row){
+    // Migrate assignments: add missing fields without losing data
+    const loaded=Array.isArray(row.assignments)?row.assignments:[];
+    assignments=loaded.map(a=>({
+      completed:false, // default
+      link:'',         // default
+      ...a             // existing fields override defaults
+    }));
+    schedules=row.schedules||{default:{blocks:cloneDefaults(),bedtime:'22:30'}};
+    calendarData=row.calendar_data||null;
+    _customClasses=row.custom_classes||{};
+  } else if(error&&error.code!=='PGRST116'){
+    // PGRST116 = no row found (new user) — that's fine, use defaults
+    // Any other error = don't wipe existing state
+    console.warn('Supabase load error:',error.message);
+  }
   launchApp();
 }
+let dataLoaded=false;
 async function saveUserData(){
-  if(!currentUserId)return;
+  if(!currentUserId||!dataLoaded)return;
   await sb.from('user_data').upsert({
     user_id:currentUserId,assignments,schedules,
     calendar_data:calendarData,custom_classes:_customClasses
@@ -711,6 +730,7 @@ function getCustomClasses(){return _customClasses||{};}
 function saveCustomClasses(map){_customClasses=map;saveUserData();}
 
 function launchApp(){
+  dataLoaded=true; // safe to save from this point on
   const initials=currentUserName.split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2);
   document.getElementById('user-avatar-chip').textContent=initials;
   document.getElementById('user-name-chip').textContent=currentUserName;
