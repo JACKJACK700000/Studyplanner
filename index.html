@@ -739,6 +739,7 @@ async function loadAndLaunch(user){
   currentUserId=user.id;currentUserEmail=user.email;
   currentUserName=user.user_metadata?.name||user.email.split('@')[0];
   const{data:row,error}=await sb.from('user_data').select('*').eq('user_id',user.id).single();
+  console.log('loadAndLaunch — userId:',user.id,'row:',row,'error:',error?.message);
   // Only update state if load succeeded — never wipe on error
   if(!error&&row){
     // Migrate assignments: add missing fields without losing data
@@ -761,10 +762,13 @@ async function loadAndLaunch(user){
 let dataLoaded=false;
 async function saveUserData(){
   if(!currentUserId||!dataLoaded)return;
-  await sb.from('user_data').upsert({
+  const{error}=await sb.from('user_data').upsert({
     user_id:currentUserId,assignments,schedules,
     calendar_data:calendarData,custom_classes:_customClasses
   },{onConflict:'user_id'});
+  if(error){
+    console.error('saveUserData error:',error.message,error.details,error.hint);
+  }
 }
 let _customClasses={};
 function getCustomClasses(){return _customClasses||{};}
