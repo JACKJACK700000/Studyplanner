@@ -762,7 +762,6 @@ async function loadAndLaunch(user){
   }
   launchApp();
 }
-let dataLoaded=false;
 function showSyncError(msg){
   let el=document.getElementById('sync-error-banner');
   if(!el){
@@ -870,7 +869,7 @@ let calYear=new Date().getFullYear(),calMonth=new Date().getMonth();
 let calView='month'; // 'month' | 'week'
 let completedBlocks={}; // blockId+date -> bool
 let timerInterval=null;
-// Drag state
+let dataLoaded=false;
 let dragAssignmentId=null,dragFromDate=null;
 
 function todayDowKey(){return['sun','mon','tue','wed','thu','fri','sat'][new Date().getDay()];}
