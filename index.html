@@ -729,7 +729,7 @@ async function doSignOut(){
   assignments=[];schedules={default:{blocks:cloneDefaults(),bedtime:'22:30'}};
   calendarData=null;editingId=null;editingDow='default';
   draftBlocks=[];draftBedtime='22:30';draftDirty=false;
-  completedBlocks={};timerInterval&&clearInterval(timerInterval);dataLoaded=false;
+  completedBlocks={};dataLoaded=false;timerInterval&&clearInterval(timerInterval);
   document.getElementById('app-screen').style.display='none';
   document.getElementById('auth-screen').style.display='flex';
   showAuthTab('login');
@@ -745,16 +745,21 @@ async function loadAndLaunch(user){
   }
   // Only update state if load succeeded — never wipe on error
   if(!error&&row){
-    // Migrate assignments: add missing fields without losing data
     const loaded=Array.isArray(row.assignments)?row.assignments:[];
-    assignments=loaded.map(a=>({
-      completed:false, // default
-      link:'',         // default
-      ...a             // existing fields override defaults
-    }));
+    assignments=loaded.map(a=>({completed:false,link:'',...a}));
     schedules=row.schedules||{default:{blocks:cloneDefaults(),bedtime:'22:30'}};
     calendarData=row.calendar_data||null;
     _customClasses=row.custom_classes||{};
+    completedBlocks=row.completed_blocks||{};
+    // Restore Google token if saved and not older than 55 minutes
+    if(row.google_token?.access_token&&row.google_token?.saved_at){
+      const age=(Date.now()-row.google_token.saved_at)/1000/60;
+      if(age<55){
+        gcAccessToken=row.google_token.access_token;
+        // Silently restore the Classroom UI after app launches
+        setTimeout(()=>loadGCUserAndCourses(),1500);
+      }
+    }
   } else if(error&&error.code!=='PGRST116'){
     // PGRST116 = no row found (new user) — that's fine, use defaults
     // Any other error = don't wipe existing state
@@ -777,7 +782,9 @@ async function saveUserData(){
   if(!currentUserId||!dataLoaded)return;
   const{error}=await sb.from('user_data').upsert({
     user_id:currentUserId,assignments,schedules,
-    calendar_data:calendarData,custom_classes:_customClasses
+    calendar_data:calendarData,custom_classes:_customClasses,
+    google_token:gcAccessToken?{access_token:gcAccessToken,saved_at:Date.now()}:null,
+    completed_blocks:completedBlocks
   },{onConflict:'user_id'});
   if(error)showSyncError(error.message);
 }
@@ -800,6 +807,7 @@ function launchApp(){
   updateCountBadge();renderList();renderClassesList();
   loadDraft('default');renderDowTabs();renderRoutineBuilder();renderRoutinePreview();
   switchTab('add');
+  initGoogleClientAfterLaunch();
 }
 window.addEventListener('DOMContentLoaded',async()=>{
   showAuthTab('login');
@@ -1364,6 +1372,7 @@ function renderTodayView(){
   blockIds.forEach(({blockKey})=>{
     document.getElementById(`tnchk-${blockKey}`)?.addEventListener('click',()=>{
       completedBlocks[blockKey]=!completedBlocks[blockKey];
+      saveUserData();
       renderTodayView();
     });
   });
@@ -1691,42 +1700,38 @@ function generateCalendar(){
   calendarData={days};saveUserData();renderCalendarGrid();
 }
 
+
 // ══════════════════════════════════════════════════
-// GOOGLE CLASSROOM IMPORT
+// GOOGLE CLASSROOM IMPORT — implicit token flow (no backend)
 // ══════════════════════════════════════════════════
 const GC_CLIENT_ID='948441152469-mfg40p830vjvob3msdj7ro09cv9eenmc.apps.googleusercontent.com';
 const GC_SCOPES='https://www.googleapis.com/auth/classroom.courses.readonly https://www.googleapis.com/auth/classroom.coursework.me.readonly https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email';
-let gcAccessToken=null;
-let gcCourses=[]; // [{id, name, assignments:[{id,title,dueDate,description,link,imported}]}]
+let gcAccessToken=null,gcCourses=[];
 
-// Initialize Google token client
 let gcTokenClient=null;
-function initGoogleClient(){
-  if(!window.google||!window.google.accounts)return;
-  gcTokenClient=google.accounts.oauth2.initTokenClient({
-    client_id:GC_CLIENT_ID,
-    scope:GC_SCOPES,
-    callback:async(resp)=>{
-      if(resp.error){console.error('GC auth error:',resp.error);return;}
-      gcAccessToken=resp.access_token;
-      await loadGCUserAndCourses();
-    }
-  });
-  // Attach connect button listener
-  document.getElementById('gc-connect-btn')?.addEventListener('click',()=>{
-    gcTokenClient.requestAccessToken({prompt:'consent'});
-  });
-  document.getElementById('gc-signout-btn')?.addEventListener('click',gcSignOut);
-  document.getElementById('gc-import-btn')?.addEventListener('click',importSelectedAssignments);
+function initGoogleClientAfterLaunch(){
+  setTimeout(()=>{
+    const check=setInterval(()=>{
+      if(window.google?.accounts?.oauth2){
+        clearInterval(check);
+        gcTokenClient=google.accounts.oauth2.initTokenClient({
+          client_id:GC_CLIENT_ID,scope:GC_SCOPES,
+          callback:async(resp)=>{
+            if(resp.error)return;
+            gcAccessToken=resp.access_token;
+            await loadGCUserAndCourses();
+          }
+        });
+        document.getElementById('gc-connect-btn')?.addEventListener('click',()=>{
+          gcTokenClient.requestAccessToken({prompt:'consent'});
+        });
+        document.getElementById('gc-signout-btn')?.addEventListener('click',gcSignOut);
+        document.getElementById('gc-import-btn')?.addEventListener('click',importSelectedAssignments);
+      }
+    },200);
+    setTimeout(()=>clearInterval(check),10000);
+  },500);
 }
-// Wait for Google script to load
-window.addEventListener('load',()=>{
-  // Poll until google.accounts is available
-  const check=setInterval(()=>{
-    if(window.google?.accounts?.oauth2){clearInterval(check);initGoogleClient();}
-  },200);
-  setTimeout(()=>clearInterval(check),10000);
-});
 
 function gcSignOut(){
   if(gcAccessToken)google.accounts.oauth2.revoke(gcAccessToken,()=>{});
@@ -1744,7 +1749,6 @@ async function gcFetch(url){
 
 async function loadGCUserAndCourses(){
   try{
-    // Get user info
     const user=await gcFetch('https://www.googleapis.com/oauth2/v2/userinfo');
     document.getElementById('gc-user-name').textContent=user.name||'';
     document.getElementById('gc-user-email').textContent=user.email||'';
@@ -1752,58 +1756,39 @@ async function loadGCUserAndCourses(){
     document.getElementById('gc-courses').style.display='';
     document.getElementById('gc-import-status').style.display='none';
     document.getElementById('gc-course-list').innerHTML='<div style="font-size:13px;color:var(--text-tertiary)">Loading courses…</div>';
-
-    // Get active courses
     const coursesData=await gcFetch('https://classroom.googleapis.com/v1/courses?courseStates=ACTIVE&pageSize=20');
     const courses=coursesData.courses||[];
     if(!courses.length){
       document.getElementById('gc-course-list').innerHTML='<p style="font-size:13px;color:var(--text-tertiary)">No active courses found.</p>';
       return;
     }
-    // Load coursework for each course
     gcCourses=[];
     await Promise.all(courses.map(async course=>{
       try{
         const cwData=await gcFetch(`https://classroom.googleapis.com/v1/courses/${course.id}/courseWork?courseWorkStates=PUBLISHED&orderBy=dueDate+desc&pageSize=20`);
         const works=cwData.courseWork||[];
         const today=new Date();today.setHours(0,0,0,0);
-        // Only include assignments with a future due date not already imported
-        const assignments=works.filter(w=>{
+        const asgs=works.filter(w=>{
           if(!w.dueDate)return false;
           const{year,month,day}=w.dueDate;
-          const due=new Date(year,month-1,day);
-          return due>=today;
+          return new Date(year,month-1,day)>=today;
         }).map(w=>{
           const{year,month,day}=w.dueDate;
           const dueStr=`${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
-          // Check if already imported (by title + dueDate match)
-          const alreadyImported=assignments_global().some(a=>a.title===w.title&&a.dueDate===dueStr);
-          return{
-            id:w.id,
-            title:w.title||'Untitled',
-            dueDate:dueStr,
-            description:w.description||'',
-            link:w.alternateLink||'',
-            subject:mapCourseToSubject(course.name),
-            courseName:course.name,
-            imported:alreadyImported
-          };
+          const alreadyImported=assignments.some(a=>a.title===w.title&&a.dueDate===dueStr);
+          return{id:w.id,title:w.title||'Untitled',dueDate:dueStr,description:w.description||'',link:w.alternateLink||'',subject:mapCourseToSubject(course.name),courseName:course.name,imported:alreadyImported};
         });
-        if(assignments.length>0){
-          gcCourses.push({id:course.id,name:course.name,assignments});
-        }
-      }catch(e){/* skip courses with API errors */}
+        if(asgs.length>0)gcCourses.push({id:course.id,name:course.name,assignments:asgs});
+      }catch(e){}
     }));
     renderGCCourses();
   }catch(e){
-    document.getElementById('gc-course-list').innerHTML=`<div class="error-msg">Failed to load courses: ${esc(e.message)}</div>`;
+    document.getElementById('gc-course-list').innerHTML=`<div class="error-msg">Failed to load: ${esc(e.message)}</div>`;
   }
 }
 
-function assignments_global(){return assignments;}
-
-function mapCourseToSubject(courseName){
-  const n=courseName.toLowerCase();
+function mapCourseToSubject(n){
+  n=n.toLowerCase();
   if(n.includes('math')||n.includes('calculus')||n.includes('algebra')||n.includes('geometry')||n.includes('statistics'))return'math';
   if(n.includes('english')||n.includes('literature')||n.includes('writing')||n.includes('reading')||n.includes('lang'))return'english';
   if(n.includes('science')||n.includes('biology')||n.includes('chemistry')||n.includes('physics')||n.includes('earth'))return'science';
@@ -1813,15 +1798,12 @@ function mapCourseToSubject(courseName){
 
 function renderGCCourses(){
   const el=document.getElementById('gc-course-list');
-  if(!gcCourses.length){
-    el.innerHTML='<p style="font-size:13px;color:var(--text-tertiary)">No upcoming assignments found.</p>';
-    return;
-  }
+  if(!gcCourses.length){el.innerHTML='<p style="font-size:13px;color:var(--text-tertiary)">No upcoming assignments found.</p>';return;}
   const totalSelectable=gcCourses.flatMap(c=>c.assignments).filter(a=>!a.imported).length;
   let html='';
   gcCourses.forEach((course,ci)=>{
     html+=`<div class="gc-course-item">
-      <input type="checkbox" class="gc-course-check" id="gc-course-${ci}" checked style="width:17px;height:17px;accent-color:var(--accent);cursor:pointer"/>
+      <input type="checkbox" id="gc-course-${ci}" checked style="width:17px;height:17px;accent-color:var(--accent);cursor:pointer"/>
       <label for="gc-course-${ci}" class="gc-course-name" style="cursor:pointer">${esc(course.name)}</label>
       <span class="gc-course-count">${course.assignments.filter(a=>!a.imported).length} pending</span>
     </div>
@@ -1839,12 +1821,9 @@ function renderGCCourses(){
     </div>`;
   });
   el.innerHTML=html;
-  // Course checkbox toggles all its assignments
   gcCourses.forEach((_,ci)=>{
     document.getElementById(`gc-course-${ci}`)?.addEventListener('change',e=>{
-      el.querySelectorAll(`.gc-assign-check[data-ci="${ci}"]`).forEach(cb=>{
-        if(!cb.disabled)cb.checked=e.target.checked;
-      });
+      el.querySelectorAll(`.gc-assign-check[data-ci="${ci}"]`).forEach(cb=>{if(!cb.disabled)cb.checked=e.target.checked;});
     });
   });
   document.getElementById('gc-import-btn').style.display=totalSelectable?'':'none';
@@ -1860,25 +1839,18 @@ async function importSelectedAssignments(){
     if(!a||a.imported)return;
     assignments.push({
       id:'a'+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
-      title:a.title,
-      subject:a.subject,
-      dueDate:a.dueDate,
-      hours:2, // default estimate
-      priority:'medium',
-      description:a.description,
-      attachment:'',
-      link:a.link,
-      completed:false
+      title:a.title,subject:a.subject,dueDate:a.dueDate,
+      hours:2,priority:'medium',description:a.description,
+      attachment:'',link:a.link,completed:false
     });
-    a.imported=true;
-    imported++;
+    a.imported=true;imported++;
   });
   if(imported){
     saveUserData();updateCountBadge();renderList();
     const status=document.getElementById('gc-import-status');
     status.textContent=`✓ Imported ${imported} assignment${imported>1?'s':''}. Switch to the Assignments tab to review.`;
     status.style.display='block';
-    renderGCCourses(); // refresh to show imported state
+    renderGCCourses();
   }
 }
 </script>
